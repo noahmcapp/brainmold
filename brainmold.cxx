@@ -94,40 +94,40 @@ string get_output_filename(Parameters &param, OutputKind type, int slab = -1)
   switch(type)
   {
     case HEMI_MOLD_IMAGE:
-      sprintf(fn_out, "%s/%s_hemi_mold.nii.gz", root, id);
+      snprintf(fn_out, 4096, "%s/%s_hemi_mold.nii.gz", root, id);
       break;
     case HEMI_VOLUME_IMAGE:
-      sprintf(fn_out, "%s/%s_hemi_volume.nii.gz", root, id);
+      snprintf(fn_out, 4096, "%s/%s_hemi_volume.nii.gz", root, id);
       break;
     case HEMI_C3D_LOG:
-      sprintf(fn_out, "%s/logs/%s_hemi_c3d_log.txt", root, id);
+      snprintf(fn_out, 4096, "%s/logs/%s_hemi_c3d_log.txt", root, id);
       break;
     case SLAB_MOLD_IMAGE:
-      sprintf(fn_out, "%s/%s_slab%02d_mold.nii.gz", root, id, slab);
+      snprintf(fn_out, 4096, "%s/%s_slab%02d_mold.nii.gz", root, id, slab);
       break;
     case SLAB_VOLUME_IMAGE:
-      sprintf(fn_out, "%s/%s_slab%02d_volume.nii.gz", root, id, slab);
+      snprintf(fn_out, 4096, "%s/%s_slab%02d_volume.nii.gz", root, id, slab);
       break;
     case SLAB_C3D_LOG:
-      sprintf(fn_out, "%s/logs/%s_slab%02d_c3d_log.txt", root, id, slab);
+      snprintf(fn_out, 4096, "%s/logs/%s_slab%02d_c3d_log.txt", root, id, slab);
       break;
     case SLAB_OPTIMIZATION_LOG:
-      sprintf(fn_out, "%s/logs/%s_slab%02d_opt_log.txt", root, id, slab);
+      snprintf(fn_out, 4096, "%s/logs/%s_slab%02d_opt_log.txt", root, id, slab);
       break;
     case SLAB_CUTPLANE_JSON:
-      sprintf(fn_out, "%s/%s_slab%02d_cutplanes.json", root, id, slab);
+      snprintf(fn_out, 4096, "%s/%s_slab%02d_cutplanes.json", root, id, slab);
       break;
     case SLAB_CUT_PNG:
-      sprintf(fn_out, "%s/tex/%s_slab%02d_cuts.png", root, id, slab);
+      snprintf(fn_out, 4096, "%s/tex/%s_slab%02d_cuts.png", root, id, slab);
       break;
     case SLAB_CUT_TEXLET:
-      sprintf(fn_out, "%s/tex/%s_slab%02d_cuts.tex", root, id, slab);
+      snprintf(fn_out, 4096, "%s/tex/%s_slab%02d_cuts.tex", root, id, slab);
       break;
     case SLAB_WITH_DOTS_VOLUME_IMAGE:
-      sprintf(fn_out, "%s/%s_slab%02d_mask_with_dots.nii.gz", root, id, slab);
+      snprintf(fn_out, 4096, "%s/%s_slab%02d_mask_with_dots.nii.gz", root, id, slab);
       break;
     case GLOBAL_TEXFILE:
-      sprintf(fn_out, "%s/tex/%s_print_template.tex", root, id);
+      snprintf(fn_out, 4096, "%s/tex/%s_print_template.tex", root, id);
       break;
   }
 
@@ -537,7 +537,7 @@ public:
         double ext_min = min(w, h), ext_max = max(w, h);
 
         char buffer[256];
-        sprintf(buffer, "  Piece %d:  Extent: %4.2f by %4.2f  Rel.Size = %6.4f",
+        snprintf(buffer, 256, "  Piece %d:  Extent: %4.2f by %4.2f  Rel.Size = %6.4f",
                 l, ext_max, ext_min, m_VGFull.m_BlockRelativeSizes[l]);
         *m_SOut << buffer<< endl;
 
@@ -803,23 +803,63 @@ void process_slab_nocuts(
         slab.y0, slab.y1);
 
   // Check if the image is empty
-  if(api.GetImage("slab")->GetBufferedRegion().GetNumberOfPixels() == 0)
+  auto *i_slab = api.GetImage("slab");
+  if(i_slab->GetBufferedRegion().GetNumberOfPixels() == 0)
     {
     cout << "  Empty slab encountered" << endl;
     return;
     }
 
-  // Extract the slab from the dots image as well
-  // Add the two images together and export as the slab image. This is all that
-  // is really needed, the rest can be done in Numpy
-  api.AddImage("dots", i_dots);
-  api.Execute(
-        "-verbose -clear -push dots -cmp -pick 1 -thresh %f %f 1 0 -push dots -times "
-        "-insert slab 1 -int 0 -foreach -info -endfor -reslice-identity -as dots_slab "
-        "-push slab -push dots_slab -thresh 0 0 1 0 -times "
-        "-push dots_slab -add -type uchar -info-full -o %s",
-	slab.y0, slab.y1,
-        get_output_filename(param, SLAB_WITH_DOTS_VOLUME_IMAGE, slab_id).c_str());
+  // Get all the dots and render them in the slab space
+  struct DotStat { int count = 0; itk::Point<double, 3> p; };
+  std::map<int, DotStat > dot_stats;
+  itk::ImageRegionIteratorWithIndex<ImageType> itd(i_dots, i_dots->GetBufferedRegion());
+  for(; !itd.IsAtEnd(); ++itd)
+    {
+    if(itd.Value() != 0)
+      {
+      itk::Point<double, 3> p;
+      i_dots->TransformIndexToPhysicalPoint(itd.GetIndex(), p);
+      dot_stats[itd.Value()].count++;
+      for(unsigned int j = 0; j < 3; j++)
+        dot_stats[itd.Value()].p[j] += p[j];
+      }
+    }
+
+  // Render each dot into the slab
+  for(auto &it : dot_stats)
+    {
+    // Find the center of the dot
+    for(unsigned int j = 0; j < 3; j++)
+      it.second.p[j] = it.second.p[j] / it.second.count;
+
+    // Project into the space of the slab image
+    itk::Index<3> idx_center;
+    i_slab->TransformPhysicalPointToIndex(it.second.p, idx_center);
+
+    // Create a region around the center - a bit larger and inside of the slab
+    itk::ImageRegion<3> dot_region(idx_center, {1u,1u,1u});
+    dot_region.PadByRadius(1);
+    if(!dot_region.Crop(i_slab->GetBufferedRegion()))
+      continue;
+
+    // Fill the region with this dot
+    if(dot_region.GetNumberOfPixels() > 0)
+      {
+      printf("Slab %d contains dot %d with physical coordinates (%8.4f, %8.4f, %8.4f)\n",
+             slab_id, it.first, it.second.p[0], it.second.p[1], it.second.p[2]);
+      }
+    for(itk::ImageRegionIterator<ImageType> itdot(i_slab, dot_region);
+        !itdot.IsAtEnd(); ++itdot)
+      {
+      itdot.Set(it.first);
+      }
+    }
+
+  // Save the image
+  api.Execute("-push slab -type uchar -o %s",
+              get_output_filename(param, SLAB_WITH_DOTS_VOLUME_IMAGE, slab_id).c_str());
+
 }
 
 void process_slab(Parameters &param, int slab_id, Slab &slab,
